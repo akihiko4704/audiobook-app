@@ -28,10 +28,13 @@
 
           <div class="now-playing-card">
             <div class="cover-art" id="coverArt" aria-label="本のカバー">
+              <img class="cover-image" id="coverImage" alt="" hidden>
               <span class="cover-sun"></span>
               <span class="cover-title">静かな<br>午後</span>
               <span class="cover-author">A STORY FOR YOU</span>
               <span class="cover-number">01</span>
+              <button class="cover-upload" id="coverUploadButton" type="button" aria-label="選択中の本のサムネイル画像を設定" title="サムネイル画像を設定" disabled>▧</button>
+              <input id="coverInput" type="file" accept="image/*" hidden>
             </div>
 
             <div class="track-details">

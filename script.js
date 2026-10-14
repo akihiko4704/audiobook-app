@@ -11,10 +11,15 @@ const currentTimeLabel = document.querySelector("#currentTime");
 const durationLabel = document.querySelector("#duration");
 const trackCount = document.querySelector("#trackCount");
 const clearButton = document.querySelector("#clearButton");
+const coverArt = document.querySelector("#coverArt");
+const coverImage = document.querySelector("#coverImage");
+const coverInput = document.querySelector("#coverInput");
+const coverUploadButton = document.querySelector("#coverUploadButton");
 
 let tracks = [];
 let currentIndex = -1;
 let activeUrl = null;
+const thumbnails = new Map();
 
 function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
@@ -39,14 +44,24 @@ function updateQueue() {
     item.className = `track-item${index === currentIndex ? " is-current" : ""}`;
     item.setAttribute("aria-current", index === currentIndex ? "true" : "false");
 
-    const number = document.createElement("span");
-    number.className = "track-index";
-    number.textContent = index === currentIndex && !audio.paused ? "♫" : String(index + 1).padStart(2, "0");
+    const thumbnail = document.createElement("span");
+    thumbnail.className = "track-thumb";
+    const thumbnailUrl = thumbnails.get(track);
+    if (thumbnailUrl) {
+      const image = document.createElement("img");
+      image.src = thumbnailUrl;
+      image.alt = "";
+      thumbnail.append(image);
+    } else {
+      thumbnail.textContent = "♫";
+      thumbnail.setAttribute("aria-hidden", "true");
+    }
 
-    const name = document.createElement("span");
-    name.className = "track-name";
-    name.textContent = track.name.replace(/\.[^.]+$/, "");
-    name.title = track.name;
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "track-select";
+    select.setAttribute("aria-label", `再生: ${track.name}`);
+    select.setAttribute("aria-pressed", String(index === currentIndex));
 
     const size = document.createElement("span");
     size.className = "track-size";
@@ -62,8 +77,14 @@ function updateQueue() {
       removeTrack(index);
     });
 
-    item.append(number, name, size, remove);
-    item.addEventListener("click", () => loadTrack(index, true));
+    const name = document.createElement("span");
+    name.className = "track-name";
+    name.textContent = track.name.replace(/\.[^.]+$/, "");
+    name.title = track.name;
+
+    select.append(thumbnail, name);
+    select.addEventListener("click", () => loadTrack(index, true));
+    item.append(select, size, remove);
     trackList.append(item);
   });
 }
@@ -74,6 +95,7 @@ function loadTrack(index, autoplay = false) {
   currentIndex = index;
   activeUrl = URL.createObjectURL(tracks[index]);
   audio.src = activeUrl;
+  showThumbnail();
   trackTitle.textContent = tracks[index].name.replace(/\.[^.]+$/, "");
   trackMeta.textContent = "ローカルオーディオブック";
   playButton.disabled = false;
@@ -82,6 +104,17 @@ function loadTrack(index, autoplay = false) {
   durationLabel.textContent = "0:00";
   updateQueue();
   if (autoplay) playAudio();
+}
+
+function showThumbnail() {
+  const track = tracks[currentIndex];
+  const thumbnailUrl = track && thumbnails.get(track);
+  coverArt.classList.toggle("has-image", Boolean(thumbnailUrl));
+  coverImage.hidden = !thumbnailUrl;
+  coverImage.alt = thumbnailUrl ? `${track.name} のサムネイル` : "";
+  if (thumbnailUrl) coverImage.src = thumbnailUrl;
+  else coverImage.removeAttribute("src");
+  coverUploadButton.disabled = !track;
 }
 
 async function playAudio() {
@@ -114,7 +147,12 @@ function addFiles(fileList) {
 
 function removeTrack(index) {
   const wasCurrent = index === currentIndex;
-  tracks.splice(index, 1);
+  const [removedTrack] = tracks.splice(index, 1);
+  const thumbnailUrl = thumbnails.get(removedTrack);
+  if (thumbnailUrl) {
+    URL.revokeObjectURL(thumbnailUrl);
+    thumbnails.delete(removedTrack);
+  }
 
   if (tracks.length === 0) {
     audio.pause();
@@ -123,6 +161,7 @@ function removeTrack(index) {
     if (activeUrl) URL.revokeObjectURL(activeUrl);
     activeUrl = null;
     currentIndex = -1;
+    showThumbnail();
     trackTitle.textContent = "まだ本が選ばれていません";
     trackMeta.textContent = "音声ファイルを追加して、再生をはじめましょう。";
     playButton.disabled = true;
@@ -133,6 +172,7 @@ function removeTrack(index) {
     loadTrack(Math.min(index, tracks.length - 1));
   } else if (index < currentIndex) {
     currentIndex -= 1;
+    showThumbnail();
   }
   updateQueue();
 }
@@ -176,9 +216,46 @@ fileInput.addEventListener("change", (event) => {
   fileInput.value = "";
 });
 
+coverUploadButton.addEventListener("click", () => {
+  if (currentIndex >= 0) coverInput.click();
+});
+
+coverInput.addEventListener("change", () => {
+  const image = coverInput.files[0];
+  coverInput.value = "";
+  if (!image) return;
+  if (!image.type.startsWith("image/")) {
+    trackMeta.textContent = "サムネイルには画像ファイルを選択してください。";
+    return;
+  }
+
+  const track = tracks[currentIndex];
+  if (!track) return;
+  const previousUrl = thumbnails.get(track);
+  if (previousUrl) URL.revokeObjectURL(previousUrl);
+  thumbnails.set(track, URL.createObjectURL(image));
+  showThumbnail();
+  updateQueue();
+});
+
 clearButton.addEventListener("click", () => {
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+  if (activeUrl) URL.revokeObjectURL(activeUrl);
+  activeUrl = null;
+  for (const thumbnailUrl of thumbnails.values()) URL.revokeObjectURL(thumbnailUrl);
+  thumbnails.clear();
   tracks = [];
-  removeTrack(currentIndex);
+  currentIndex = -1;
+  trackTitle.textContent = "まだ本が選ばれていません";
+  trackMeta.textContent = "音声ファイルを追加して、再生をはじめましょう。";
+  playButton.disabled = true;
+  seekBar.disabled = true;
+  currentTimeLabel.textContent = "0:00";
+  durationLabel.textContent = "0:00";
+  showThumbnail();
+  updateQueue();
 });
 
 audio.addEventListener("timeupdate", () => {

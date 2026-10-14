@@ -33,6 +33,12 @@ button { color: inherit; }
 .section-heading p { margin: 0; color: var(--muted); font-size: 12px; }
 .now-playing-card { display: grid; grid-template-columns: 224px minmax(0, 1fr); align-items: center; gap: 36px; padding: 32px; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(135deg, rgba(255,255,255,.035), rgba(255,255,255,.012)); box-shadow: 0 22px 60px rgba(0,0,0,.15); }
 .cover-art { position: relative; isolation: isolate; display: flex; min-height: 260px; overflow: hidden; flex-direction: column; justify-content: flex-end; padding: 24px; background: linear-gradient(148deg, #a4a981 0%, #687458 41%, #454b3c 100%); color: #20231b; box-shadow: 0 12px 30px rgba(0,0,0,.23); }
+.cover-image { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.cover-art.has-image { background: #292a26; color: white; }
+.cover-art.has-image::before, .cover-art.has-image::after, .cover-art.has-image .cover-sun, .cover-art.has-image .cover-title, .cover-art.has-image .cover-author, .cover-art.has-image .cover-number { display: none; }
+.cover-upload { position: absolute; top: 9px; right: 9px; display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid rgba(255,255,255,.3); border-radius: 50%; background: rgba(16,17,15,.62); color: white; cursor: pointer; font-size: 16px; backdrop-filter: blur(5px); }
+.cover-upload:hover:not(:disabled) { background: rgba(16,17,15,.88); }
+.cover-upload:disabled { cursor: default; opacity: .45; }
 .cover-art::before, .cover-art::after { position: absolute; z-index: -1; content: ""; border: 1px solid rgba(237, 231, 193, .4); border-radius: 50%; }
 .cover-art::before { width: 270px; height: 270px; left: -90px; top: -80px; }
 .cover-art::after { width: 190px; height: 190px; right: -72px; top: 58px; }
@@ -83,15 +89,20 @@ button { color: inherit; }
 .queue-empty > span { color: #a7ad8e; font-size: 27px; }
 .queue-empty p { font-size: 10px; line-height: 1.9; }
 .track-list { display: flex; max-height: 285px; flex-direction: column; gap: 5px; overflow-y: auto; margin: 20px -8px 0 0; padding: 0 8px 0 0; list-style: none; }
-.track-item { display: grid; grid-template-columns: 23px minmax(0,1fr) auto; align-items: center; gap: 9px; min-height: 53px; padding: 7px 9px; border: 1px solid transparent; border-radius: 5px; cursor: pointer; }
+.track-item { display: grid; grid-template-columns: minmax(0,1fr) auto 20px; align-items: center; gap: 8px; min-height: 53px; padding: 6px 8px; border: 1px solid transparent; border-radius: 5px; }
 .track-item:hover { background: rgba(255,255,255,.035); }
 .track-item.is-current { border-color: rgba(200,212,154,.18); background: rgba(200,212,154,.055); }
-.track-index { color: #7f8179; font: 9px var(--mono); text-align: center; }
+.track-select { display: flex; min-width: 0; align-items: center; gap: 9px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.track-select:focus-visible, .track-remove:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+.track-select:hover .track-name, .track-item.is-current .track-name { color: var(--accent); }
+.track-thumb { display: grid; width: 32px; height: 38px; overflow: hidden; place-items: center; border-radius: 3px; background: linear-gradient(145deg, #7c8567, #404638); color: #d8dbbc; font-size: 14px; }
+.track-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.track-index { display: none; color: #7f8179; font: 9px var(--mono); text-align: center; }
 .track-item.is-current .track-index { color: var(--accent); }
 .track-name { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .track-size { color: #767870; font: 8px var(--mono); }
-.track-remove { display: none; width: 20px; border: 0; background: transparent; color: #999; cursor: pointer; }
-.track-item:hover .track-remove { display: block; }
+.track-remove { width: 20px; padding: 0; border: 0; background: transparent; color: #999; cursor: pointer; opacity: .45; }
+.track-item:hover .track-remove, .track-remove:focus-visible { opacity: 1; }
 .clear-button { margin: 13px 0 0 8px; padding: 0; border: 0; background: none; color: #8e9088; cursor: pointer; font-size: 9px; text-decoration: underline; text-underline-offset: 3px; }
 .clear-button:hover { color: var(--accent); }
 .privacy-note { margin: 25px 0 0; padding-top: 16px; border-top: 1px solid var(--line); color: #85877e; font-size: 9px; line-height: 1.9; }
