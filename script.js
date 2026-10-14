@@ -15,11 +15,22 @@ const coverArt = document.querySelector("#coverArt");
 const coverImage = document.querySelector("#coverImage");
 const coverInput = document.querySelector("#coverInput");
 const coverUploadButton = document.querySelector("#coverUploadButton");
+const repeatButton = document.querySelector("#repeatButton");
+const repeatBadge = document.querySelector("#repeatBadge");
+const chapterList = document.querySelector("#chapterList");
+const chaptersEmpty = document.querySelector("#chaptersEmpty");
+const chapterPosition = document.querySelector("#chapterPosition");
+const addChapterButton = document.querySelector("#addChapterButton");
+const previousChapterButton = document.querySelector("#previousChapterButton");
+const nextChapterButton = document.querySelector("#nextChapterButton");
 
 let tracks = [];
 let currentIndex = -1;
 let activeUrl = null;
+let repeatMode = "off";
 const thumbnails = new Map();
+const chaptersByTrack = new Map();
+const chapterLoadErrors = new Set();
 
 function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
@@ -31,6 +42,190 @@ function formatTime(seconds) {
 function formatSize(bytes) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function decodeChapterTitle(bytes) {
+  if (bytes.length === 0) return "";
+  const encoding = bytes[0];
+  let text;
+  try {
+    if (encoding === 1) text = new TextDecoder("utf-16").decode(bytes.subarray(1));
+    else if (encoding === 2) text = new TextDecoder("utf-16be").decode(bytes.subarray(1));
+    else if (encoding === 3) text = new TextDecoder("utf-8").decode(bytes.subarray(1));
+    else text = new TextDecoder("windows-1252").decode(bytes.subarray(1));
+  } catch {
+    text = new TextDecoder().decode(bytes.subarray(1));
+  }
+  return text.replace(/\0+$/g, "").trim();
+}
+
+function parseId3Chapters(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.length < 10 || String.fromCharCode(...bytes.subarray(0, 3)) !== "ID3") return [];
+  const version = bytes[3];
+  if (version < 3 || version > 4) return [];
+  const tagSize = (bytes[6] << 21) | (bytes[7] << 14) | (bytes[8] << 7) | bytes[9];
+  const tagEnd = Math.min(bytes.length, 10 + tagSize);
+  let offset = 10;
+  if (bytes[5] & 0x40) {
+    if (offset + 4 > tagEnd) return [];
+    const extendedSize = version === 4
+      ? ((bytes[offset] << 21) | (bytes[offset + 1] << 14) | (bytes[offset + 2] << 7) | bytes[offset + 3])
+      : view.getUint32(offset);
+    offset += version === 4 ? extendedSize : extendedSize + 4;
+  }
+
+  const chapters = [];
+  while (offset + 10 <= tagEnd) {
+    const frameId = String.fromCharCode(...bytes.subarray(offset, offset + 4));
+    if (!/^[A-Z0-9]{4}$/.test(frameId)) break;
+    const size = version === 4
+      ? ((bytes[offset + 4] << 21) | (bytes[offset + 5] << 14) | (bytes[offset + 6] << 7) | bytes[offset + 7])
+      : view.getUint32(offset + 4);
+    const frameStart = offset + 10;
+    const frameEnd = frameStart + size;
+    if (size <= 0 || frameEnd > tagEnd) break;
+
+    if (frameId === "CHAP" && size >= 17) {
+      const chapterIdEnd = bytes.indexOf(0, frameStart);
+      const dataStart = chapterIdEnd + 1;
+      if (chapterIdEnd >= frameStart && dataStart + 16 <= frameEnd) {
+        const time = view.getUint32(dataStart) / 1000;
+        let subframeOffset = dataStart + 16;
+        let title = "";
+        while (subframeOffset + 10 <= frameEnd) {
+          const subframeId = String.fromCharCode(...bytes.subarray(subframeOffset, subframeOffset + 4));
+          const subframeSize = version === 4
+            ? ((bytes[subframeOffset + 4] << 21) | (bytes[subframeOffset + 5] << 14) | (bytes[subframeOffset + 6] << 7) | bytes[subframeOffset + 7])
+            : view.getUint32(subframeOffset + 4);
+          const subframeStart = subframeOffset + 10;
+          if (subframeSize <= 0 || subframeStart + subframeSize > frameEnd) break;
+          if (subframeId === "TIT2") {
+            title = decodeChapterTitle(bytes.subarray(subframeStart, subframeStart + subframeSize));
+            break;
+          }
+          subframeOffset = subframeStart + subframeSize;
+        }
+        if (Number.isFinite(time) && time >= 0) {
+          chapters.push({ time, title: title || `チャプター ${chapters.length + 1}`, source: "embedded" });
+        }
+      }
+    }
+    offset = frameEnd;
+  }
+  return chapters.sort((a, b) => a.time - b.time);
+}
+
+async function parseMp4Chapters(file) {
+  const chunkSize = 2 * 1024 * 1024;
+  const overlap = 16;
+  for (let start = 0; start < file.size; start += chunkSize) {
+    const end = Math.min(file.size, start + chunkSize + overlap);
+    const bytes = new Uint8Array(await file.slice(start, end).arrayBuffer());
+    for (let index = 4; index + 9 <= bytes.length; index += 1) {
+      if (bytes[index] !== 0x63 || bytes[index + 1] !== 0x68 || bytes[index + 2] !== 0x70 || bytes[index + 3] !== 0x6c) continue;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const atomStart = index - 4;
+      const atomSize = view.getUint32(atomStart);
+      const absoluteStart = start + atomStart;
+      if (atomSize < 17 || atomSize > 1024 * 1024 || absoluteStart + atomSize > file.size) continue;
+      const atom = new Uint8Array(await file.slice(absoluteStart, absoluteStart + atomSize).arrayBuffer());
+      const payloadStart = 8;
+      const chapterCount = atom[payloadStart + 8];
+      let offset = payloadStart + 9;
+      const chapters = [];
+      for (let chapterIndex = 0; chapterIndex < chapterCount && offset + 9 <= atom.length; chapterIndex += 1) {
+        const timeTicks = new DataView(atom.buffer, atom.byteOffset + offset, 8).getBigUint64(0);
+        offset += 8;
+        const titleLength = atom[offset++];
+        if (offset + titleLength > atom.length) break;
+        const title = new TextDecoder("utf-8").decode(atom.subarray(offset, offset + titleLength)).trim();
+        offset += titleLength;
+        chapters.push({
+          time: Number(timeTicks) / 10_000_000,
+          title: title || `チャプター ${chapterIndex + 1}`,
+          source: "embedded",
+        });
+      }
+      if (chapters.length > 0) return chapters.sort((a, b) => a.time - b.time);
+    }
+  }
+  return [];
+}
+
+async function readEmbeddedChapters(file) {
+  if (/\.mp3$/i.test(file.name)) {
+    const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+    if (header.length < 10 || String.fromCharCode(...header.subarray(0, 3)) !== "ID3") return [];
+    const tagSize = (header[6] << 21) | (header[7] << 14) | (header[8] << 7) | header[9];
+    const maxTagSize = 64 * 1024 * 1024;
+    if (tagSize > maxTagSize) throw new Error("ID3 tag is larger than the 64 MB parsing limit");
+    const tag = new Uint8Array(await file.slice(0, Math.min(file.size, tagSize + 10)).arrayBuffer());
+    return parseId3Chapters(tag);
+  }
+  if (/\.(m4a|m4b|mp4|aac)$/i.test(file.name)) return parseMp4Chapters(file);
+  return [];
+}
+
+function currentChapters() {
+  return tracks[currentIndex] ? chaptersByTrack.get(tracks[currentIndex]) || [] : [];
+}
+
+function activeChapterIndex(chapters = currentChapters()) {
+  for (let index = chapters.length - 1; index >= 0; index -= 1) {
+    if (audio.currentTime >= chapters[index].time) return index;
+  }
+  return -1;
+}
+
+function renderChapters() {
+  const chapters = currentChapters();
+  const activeIndex = activeChapterIndex(chapters);
+  chapterList.replaceChildren();
+  chapterList.hidden = chapters.length === 0;
+  chaptersEmpty.hidden = chapters.length > 0;
+  chaptersEmpty.textContent = tracks[currentIndex] && chapterLoadErrors.has(tracks[currentIndex])
+    ? "チャプター情報を読み込めませんでした。再生位置から追加できます。"
+    : "チャプター情報がありません。再生位置から追加できます。";
+  addChapterButton.disabled = currentIndex < 0;
+  previousChapterButton.disabled = currentIndex < 0 || chapters.length === 0;
+  nextChapterButton.disabled = currentIndex < 0 || chapters.length === 0;
+
+  chapters.forEach((chapter, index) => {
+    const item = document.createElement("li");
+    item.className = "chapter-item";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `chapter-select${index === activeIndex ? " is-active" : ""}`;
+    button.setAttribute("aria-current", index === activeIndex ? "true" : "false");
+    const time = document.createElement("span");
+    time.className = "chapter-time";
+    time.textContent = formatTime(chapter.time);
+    const name = document.createElement("span");
+    name.className = "chapter-name";
+    name.textContent = chapter.title;
+    button.append(time, name);
+    button.addEventListener("click", () => {
+      audio.currentTime = chapter.time;
+      if (audio.paused) playAudio();
+    });
+    item.append(button);
+    chapterList.append(item);
+  });
+  updateActiveChapter();
+}
+
+function updateActiveChapter() {
+  const chapters = currentChapters();
+  const activeIndex = activeChapterIndex(chapters);
+  chapterPosition.textContent = chapters.length && activeIndex >= 0 ? `${activeIndex + 1} / ${chapters.length}` : "—";
+  chapterList.querySelectorAll(".chapter-select").forEach((button, index) => {
+    const isActive = index === activeIndex;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-current", String(isActive));
+  });
+  previousChapterButton.disabled = currentIndex < 0 || chapters.length === 0 || activeIndex < 0;
+  nextChapterButton.disabled = currentIndex < 0 || activeIndex >= chapters.length - 1;
 }
 
 function updateQueue() {
@@ -60,7 +255,7 @@ function updateQueue() {
     const select = document.createElement("button");
     select.type = "button";
     select.className = "track-select";
-    select.setAttribute("aria-label", `再生: ${track.name}`);
+    select.setAttribute("aria-label", `${index + 1}番目のトラックを再生: ${track.name}`);
     select.setAttribute("aria-pressed", String(index === currentIndex));
 
     const size = document.createElement("span");
@@ -82,7 +277,13 @@ function updateQueue() {
     name.textContent = track.name.replace(/\.[^.]+$/, "");
     name.title = track.name;
 
+    const playIcon = document.createElement("span");
+    playIcon.className = "track-play-icon";
+    playIcon.setAttribute("aria-hidden", "true");
+    playIcon.textContent = index === currentIndex && !audio.paused ? "Ⅱ" : "▶";
+
     select.append(thumbnail, name);
+    select.append(playIcon);
     select.addEventListener("click", () => loadTrack(index, true));
     item.append(select, size, remove);
     trackList.append(item);
@@ -95,6 +296,7 @@ function loadTrack(index, autoplay = false) {
   currentIndex = index;
   activeUrl = URL.createObjectURL(tracks[index]);
   audio.src = activeUrl;
+  audio.loop = repeatMode === "one";
   showThumbnail();
   trackTitle.textContent = tracks[index].name.replace(/\.[^.]+$/, "");
   trackMeta.textContent = "ローカルオーディオブック";
@@ -103,6 +305,7 @@ function loadTrack(index, autoplay = false) {
   currentTimeLabel.textContent = "0:00";
   durationLabel.textContent = "0:00";
   updateQueue();
+  renderChapters();
   if (autoplay) playAudio();
 }
 
@@ -140,6 +343,19 @@ function addFiles(fileList) {
   tracks.push(...audioFiles);
   updateQueue();
   if (wasEmpty) loadTrack(0);
+  for (const file of audioFiles) {
+    readEmbeddedChapters(file).then((chapters) => {
+      if (!tracks.includes(file)) return;
+      chapterLoadErrors.delete(file);
+      if (chapters.length > 0) chaptersByTrack.set(file, chapters);
+      if (tracks[currentIndex] === file) renderChapters();
+    }).catch((error) => {
+      if (!tracks.includes(file)) return;
+      chapterLoadErrors.add(file);
+      console.error(`Could not read embedded chapters from "${file.name}":`, error);
+      if (tracks[currentIndex] === file) renderChapters();
+    });
+  }
   if (audioFiles.length < fileList.length) {
     trackMeta.textContent = "一部のファイルは音声形式ではないため追加されませんでした。";
   }
@@ -148,6 +364,8 @@ function addFiles(fileList) {
 function removeTrack(index) {
   const wasCurrent = index === currentIndex;
   const [removedTrack] = tracks.splice(index, 1);
+  chaptersByTrack.delete(removedTrack);
+  chapterLoadErrors.delete(removedTrack);
   const thumbnailUrl = thumbnails.get(removedTrack);
   if (thumbnailUrl) {
     URL.revokeObjectURL(thumbnailUrl);
@@ -168,6 +386,7 @@ function removeTrack(index) {
     seekBar.disabled = true;
     currentTimeLabel.textContent = "0:00";
     durationLabel.textContent = "0:00";
+    updateActiveChapter();
   } else if (wasCurrent) {
     loadTrack(Math.min(index, tracks.length - 1));
   } else if (index < currentIndex) {
@@ -175,6 +394,7 @@ function removeTrack(index) {
     showThumbnail();
   }
   updateQueue();
+  renderChapters();
 }
 
 playButton.addEventListener("click", () => {
@@ -183,12 +403,17 @@ playButton.addEventListener("click", () => {
 });
 
 document.querySelector("#previousButton").addEventListener("click", () => {
-  if (currentIndex > 0) loadTrack(currentIndex - 1, true);
-  else if (audio.currentTime > 3) audio.currentTime = 0;
+  if (currentIndex < 0 || tracks.length === 0) return;
+  if (audio.currentTime > 3) {
+    audio.currentTime = 0;
+    return;
+  }
+  loadTrack((currentIndex - 1 + tracks.length) % tracks.length, true);
 });
 
 document.querySelector("#nextButton").addEventListener("click", () => {
-  if (currentIndex < tracks.length - 1) loadTrack(currentIndex + 1, true);
+  if (currentIndex < 0 || tracks.length === 0) return;
+  loadTrack((currentIndex + 1) % tracks.length, true);
 });
 
 document.querySelector("#backButton").addEventListener("click", () => {
@@ -197,6 +422,38 @@ document.querySelector("#backButton").addEventListener("click", () => {
 
 document.querySelector("#forwardButton").addEventListener("click", () => {
   if (Number.isFinite(audio.duration)) audio.currentTime = Math.min(audio.duration, audio.currentTime + 15);
+});
+
+previousChapterButton.addEventListener("click", () => {
+  const chapters = currentChapters();
+  const activeIndex = activeChapterIndex(chapters);
+  if (activeIndex < 0) return;
+  const targetIndex = audio.currentTime - chapters[activeIndex].time > 3 ? activeIndex : activeIndex - 1;
+  if (targetIndex >= 0) audio.currentTime = chapters[targetIndex].time;
+  else audio.currentTime = 0;
+});
+
+nextChapterButton.addEventListener("click", () => {
+  const chapters = currentChapters();
+  const nextIndex = activeChapterIndex(chapters) + 1;
+  if (nextIndex >= 0 && nextIndex < chapters.length) audio.currentTime = chapters[nextIndex].time;
+});
+
+addChapterButton.addEventListener("click", () => {
+  if (currentIndex < 0) return;
+  const chapters = currentChapters();
+  const suggestedTitle = `チャプター ${chapters.length + 1}`;
+  const title = window.prompt("チャプター名を入力してください。", suggestedTitle);
+  if (title === null) return;
+  const trimmedTitle = title.trim();
+  if (!trimmedTitle) {
+    trackMeta.textContent = "チャプター名を入力してください。";
+    return;
+  }
+  chapters.push({ time: audio.currentTime, title: trimmedTitle, source: "manual" });
+  chapters.sort((a, b) => a.time - b.time);
+  chaptersByTrack.set(tracks[currentIndex], chapters);
+  renderChapters();
 });
 
 seekBar.addEventListener("input", () => {
@@ -209,6 +466,20 @@ document.querySelector("#volumeBar").addEventListener("input", (event) => {
 
 document.querySelector("#speedSelect").addEventListener("change", (event) => {
   audio.playbackRate = Number(event.target.value);
+});
+
+repeatButton.addEventListener("click", () => {
+  repeatMode = repeatMode === "off" ? "all" : repeatMode === "all" ? "one" : "off";
+  audio.loop = repeatMode === "one";
+  const labels = {
+    off: "リピート: オフ",
+    all: "リピート: 全曲",
+    one: "リピート: 1曲",
+  };
+  repeatButton.setAttribute("aria-label", labels[repeatMode]);
+  repeatButton.title = `${labels[repeatMode]}（クリックで切り替え）`;
+  repeatButton.setAttribute("aria-pressed", String(repeatMode !== "off"));
+  repeatBadge.hidden = repeatMode !== "one";
 });
 
 fileInput.addEventListener("change", (event) => {
@@ -246,6 +517,8 @@ clearButton.addEventListener("click", () => {
   activeUrl = null;
   for (const thumbnailUrl of thumbnails.values()) URL.revokeObjectURL(thumbnailUrl);
   thumbnails.clear();
+  chaptersByTrack.clear();
+  chapterLoadErrors.clear();
   tracks = [];
   currentIndex = -1;
   trackTitle.textContent = "まだ本が選ばれていません";
@@ -256,6 +529,7 @@ clearButton.addEventListener("click", () => {
   durationLabel.textContent = "0:00";
   showThumbnail();
   updateQueue();
+  renderChapters();
 });
 
 audio.addEventListener("timeupdate", () => {
@@ -263,10 +537,12 @@ audio.addEventListener("timeupdate", () => {
   if (Number.isFinite(audio.duration) && audio.duration > 0) {
     seekBar.value = String(Math.round((audio.currentTime / audio.duration) * 1000));
   }
+  updateActiveChapter();
 });
 
 audio.addEventListener("loadedmetadata", () => {
   durationLabel.textContent = formatTime(audio.duration);
+  renderChapters();
 });
 
 audio.addEventListener("play", () => {
@@ -283,6 +559,7 @@ audio.addEventListener("pause", () => {
 
 audio.addEventListener("ended", () => {
   if (currentIndex < tracks.length - 1) loadTrack(currentIndex + 1, true);
+  else if (repeatMode === "all" && tracks.length > 0) loadTrack(0, true);
 });
 
 dropZone.addEventListener("dragover", (event) => {
@@ -302,3 +579,4 @@ dropZone.addEventListener("drop", (event) => {
 
 audio.volume = 0.8;
 updateQueue();
+renderChapters();

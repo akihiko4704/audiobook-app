@@ -56,16 +56,21 @@
                 <button class="icon-button skip-button" id="forwardButton" type="button" aria-label="15秒進む" title="15秒進む">↷<small>15</small></button>
               </div>
               <div class="player-options">
-                <label class="speed-control">速度
-                  <select id="speedSelect" aria-label="再生速度">
-                    <option value="0.75">0.75×</option>
-                    <option value="1" selected>1.0×</option>
-                    <option value="1.25">1.25×</option>
-                    <option value="1.5">1.5×</option>
-                    <option value="1.75">1.75×</option>
-                    <option value="2">2.0×</option>
-                  </select>
-                </label>
+                <div class="playback-settings">
+                  <button class="repeat-button" id="repeatButton" type="button" aria-label="リピート: オフ" title="リピート: オフ" aria-pressed="false">
+                    <span aria-hidden="true">↻</span><small id="repeatBadge" hidden>1</small>
+                  </button>
+                  <label class="speed-control">速度
+                    <select id="speedSelect" aria-label="再生速度">
+                      <option value="0.75">0.75×</option>
+                      <option value="1" selected>1.0×</option>
+                      <option value="1.25">1.25×</option>
+                      <option value="1.5">1.5×</option>
+                      <option value="1.75">1.75×</option>
+                      <option value="2">2.0×</option>
+                    </select>
+                  </label>
+                </div>
                 <label class="volume-control" for="volumeBar">
                   <span aria-hidden="true">◖</span>
                   <input id="volumeBar" class="range volume-range" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="音量">
@@ -73,6 +78,20 @@
               </div>
             </div>
           </div>
+
+          <section class="chapters-panel" aria-labelledby="chaptersTitle">
+            <div class="chapters-heading">
+              <div><span class="eyebrow">BOOK CONTENT</span><h2 id="chaptersTitle">チャプター</h2></div>
+              <button class="add-chapter-button" id="addChapterButton" type="button" disabled>＋ 追加</button>
+            </div>
+            <div class="chapter-navigation">
+              <button class="chapter-nav-button" id="previousChapterButton" type="button" disabled>‹ 前のチャプター</button>
+              <span id="chapterPosition">—</span>
+              <button class="chapter-nav-button" id="nextChapterButton" type="button" disabled>次のチャプター ›</button>
+            </div>
+            <p class="chapters-empty" id="chaptersEmpty">チャプター情報がありません。再生位置から追加できます。</p>
+            <ol class="chapter-list" id="chapterList" aria-label="チャプター一覧" hidden></ol>
+          </section>
 
           <label class="drop-zone" id="dropZone" for="fileInput">
             <input id="fileInput" type="file" accept="audio/*,.mp3,.m4a,.m4b,.aac,.wav,.ogg,.flac,.opus" multiple>
