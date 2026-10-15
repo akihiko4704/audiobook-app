@@ -7,6 +7,7 @@ const playButton = document.querySelector("#playButton");
 const seekBar = document.querySelector("#seekBar");
 const trackTitle = document.querySelector("#trackTitle");
 const trackMeta = document.querySelector("#trackMeta");
+const currentChapterLabel = document.querySelector("#currentChapter");
 const currentTimeLabel = document.querySelector("#currentTime");
 const durationLabel = document.querySelector("#duration");
 const trackCount = document.querySelector("#trackCount");
@@ -116,6 +117,72 @@ function parseId3Chapters(bytes) {
   return chapters.sort((a, b) => a.time - b.time);
 }
 
+function detectImageType(bytes, fallback = "") {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes.length >= 6 && String.fromCharCode(...bytes.subarray(0, 3)) === "GIF") return "image/gif";
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF" && String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP") return "image/webp";
+  return fallback.startsWith("image/") ? fallback : "";
+}
+
+function parseId3Artwork(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.length < 10 || String.fromCharCode(...bytes.subarray(0, 3)) !== "ID3") return null;
+  const version = bytes[3];
+  if (version < 3 || version > 4) return null;
+  const tagSize = (bytes[6] << 21) | (bytes[7] << 14) | (bytes[8] << 7) | bytes[9];
+  const tagEnd = Math.min(bytes.length, 10 + tagSize);
+  let offset = 10;
+  if (bytes[5] & 0x40) {
+    if (offset + 4 > tagEnd) return null;
+    const extendedSize = version === 4
+      ? ((bytes[offset] << 21) | (bytes[offset + 1] << 14) | (bytes[offset + 2] << 7) | bytes[offset + 3])
+      : view.getUint32(offset);
+    offset += version === 4 ? extendedSize : extendedSize + 4;
+  }
+
+  while (offset + 10 <= tagEnd) {
+    const frameId = String.fromCharCode(...bytes.subarray(offset, offset + 4));
+    if (!/^[A-Z0-9]{4}$/.test(frameId)) break;
+    const size = version === 4
+      ? ((bytes[offset + 4] << 21) | (bytes[offset + 5] << 14) | (bytes[offset + 6] << 7) | bytes[offset + 7])
+      : view.getUint32(offset + 4);
+    const frameStart = offset + 10;
+    const frameEnd = frameStart + size;
+    if (size <= 0 || frameEnd > tagEnd) break;
+
+    if (frameId === "APIC" && size > 5) {
+      const encoding = bytes[frameStart];
+      const mimeEnd = bytes.indexOf(0, frameStart + 1);
+      if (mimeEnd >= 0 && mimeEnd + 2 < frameEnd) {
+        const mime = String.fromCharCode(...bytes.subarray(frameStart + 1, mimeEnd)).toLowerCase();
+        const descriptionStart = mimeEnd + 2;
+        let descriptionEnd = -1;
+        let terminatorSize = 1;
+        if (encoding === 1 || encoding === 2) {
+          terminatorSize = 2;
+          for (let index = descriptionStart; index + 1 < frameEnd; index += 2) {
+            if (bytes[index] === 0 && bytes[index + 1] === 0) {
+              descriptionEnd = index;
+              break;
+            }
+          }
+        } else {
+          descriptionEnd = bytes.indexOf(0, descriptionStart);
+        }
+        if (descriptionEnd >= 0) {
+          const imageStart = descriptionEnd + terminatorSize;
+          const imageBytes = bytes.subarray(imageStart, frameEnd);
+          const type = detectImageType(imageBytes, mime);
+          if (imageBytes.length > 0 && type) return new Blob([imageBytes], { type });
+        }
+      }
+    }
+    offset = frameEnd;
+  }
+  return null;
+}
+
 async function parseMp4Chapters(file) {
   const chunkSize = 2 * 1024 * 1024;
   const overlap = 16;
@@ -153,6 +220,42 @@ async function parseMp4Chapters(file) {
   return [];
 }
 
+async function parseMp4Artwork(file) {
+  const chunkSize = 2 * 1024 * 1024;
+  const overlap = 16;
+  const maxArtworkSize = 32 * 1024 * 1024;
+  for (let start = 0; start < file.size; start += chunkSize) {
+    const end = Math.min(file.size, start + chunkSize + overlap);
+    const bytes = new Uint8Array(await file.slice(start, end).arrayBuffer());
+    for (let index = 4; index + 8 <= bytes.length; index += 1) {
+      if (bytes[index] !== 0x63 || bytes[index + 1] !== 0x6f || bytes[index + 2] !== 0x76 || bytes[index + 3] !== 0x72) continue;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const atomStart = index - 4;
+      const atomSize = view.getUint32(atomStart);
+      const absoluteStart = start + atomStart;
+      if (atomSize < 24 || atomSize > maxArtworkSize || absoluteStart + atomSize > file.size) continue;
+
+      const atom = new Uint8Array(await file.slice(absoluteStart, absoluteStart + atomSize).arrayBuffer());
+      const atomView = new DataView(atom.buffer, atom.byteOffset, atom.byteLength);
+      let offset = 8;
+      while (offset + 16 <= atom.length) {
+        const dataSize = atomView.getUint32(offset);
+        const dataType = String.fromCharCode(...atom.subarray(offset + 4, offset + 8));
+        if (dataSize < 16 || offset + dataSize > atom.length) break;
+        if (dataType === "data") {
+          const imageKind = atomView.getUint32(offset + 8) & 0xffffff;
+          const imageBytes = atom.subarray(offset + 16, offset + dataSize);
+          const fallback = imageKind === 13 ? "image/jpeg" : imageKind === 14 ? "image/png" : "";
+          const type = detectImageType(imageBytes, fallback);
+          if (imageBytes.length > 0 && type) return new Blob([imageBytes], { type });
+        }
+        offset += dataSize;
+      }
+    }
+  }
+  return null;
+}
+
 async function readEmbeddedChapters(file) {
   if (/\.mp3$/i.test(file.name)) {
     const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
@@ -165,6 +268,23 @@ async function readEmbeddedChapters(file) {
   }
   if (/\.(m4a|m4b|mp4|aac)$/i.test(file.name)) return parseMp4Chapters(file);
   return [];
+}
+
+async function readEmbeddedArtwork(file) {
+  if (/\.(mp3|aac)$/i.test(file.name)) {
+    const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+    if (header.length >= 10 && String.fromCharCode(...header.subarray(0, 3)) === "ID3") {
+      const tagSize = (header[6] << 21) | (header[7] << 14) | (header[8] << 7) | header[9];
+      const maxTagSize = 64 * 1024 * 1024;
+      if (tagSize > maxTagSize) throw new Error("ID3 tag is larger than the 64 MB parsing limit");
+      const tag = new Uint8Array(await file.slice(0, Math.min(file.size, tagSize + 10)).arrayBuffer());
+      return parseId3Artwork(tag);
+    }
+    if (/\.aac$/i.test(file.name)) return parseMp4Artwork(file);
+    return null;
+  }
+  if (/\.(m4a|m4b|mp4)$/i.test(file.name)) return parseMp4Artwork(file);
+  return null;
 }
 
 function currentChapters() {
@@ -181,6 +301,9 @@ function activeChapterIndex(chapters = currentChapters()) {
 function renderChapters() {
   const chapters = currentChapters();
   const activeIndex = activeChapterIndex(chapters);
+  const activeChapter = chapters[activeIndex];
+  currentChapterLabel.textContent = activeChapter ? `♫ ${activeChapter.title}` : "";
+  currentChapterLabel.hidden = !activeChapter;
   chapterList.replaceChildren();
   chapterList.hidden = chapters.length === 0;
   chaptersEmpty.hidden = chapters.length > 0;
@@ -218,7 +341,10 @@ function renderChapters() {
 function updateActiveChapter() {
   const chapters = currentChapters();
   const activeIndex = activeChapterIndex(chapters);
-  chapterPosition.textContent = chapters.length && activeIndex >= 0 ? `${activeIndex + 1} / ${chapters.length}` : "—";
+  const activeChapter = chapters[activeIndex];
+  chapterPosition.textContent = activeChapter ? `${activeIndex + 1} / ${chapters.length}` : "—";
+  currentChapterLabel.textContent = activeChapter ? `♫ ${activeChapter.title}` : "";
+  currentChapterLabel.hidden = !activeChapter;
   chapterList.querySelectorAll(".chapter-select").forEach((button, index) => {
     const isActive = index === activeIndex;
     button.classList.toggle("is-active", isActive);
@@ -354,6 +480,14 @@ function addFiles(fileList) {
       chapterLoadErrors.add(file);
       console.error(`Could not read embedded chapters from "${file.name}":`, error);
       if (tracks[currentIndex] === file) renderChapters();
+    });
+    readEmbeddedArtwork(file).then((artwork) => {
+      if (!artwork || !tracks.includes(file) || thumbnails.has(file)) return;
+      thumbnails.set(file, URL.createObjectURL(artwork));
+      updateQueue();
+      if (tracks[currentIndex] === file) showThumbnail();
+    }).catch((error) => {
+      console.error(`Could not read embedded artwork from "${file.name}":`, error);
     });
   }
   if (audioFiles.length < fileList.length) {
