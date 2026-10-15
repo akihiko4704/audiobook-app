@@ -6,6 +6,8 @@ const remoteTrackUrl = document.querySelector("#remoteTrackUrl");
 const remoteTrackMessage = document.querySelector("#remoteTrackMessage");
 const trackList = document.querySelector("#trackList");
 const queueEmpty = document.querySelector("#queueEmpty");
+const queueSearch = document.querySelector("#queueSearch");
+const queueNoResults = document.querySelector("#queueNoResults");
 const playButton = document.querySelector("#playButton");
 const seekBar = document.querySelector("#seekBar");
 const trackTitle = document.querySelector("#trackTitle");
@@ -188,6 +190,37 @@ function decodeChapterTitle(bytes) {
   return text.replace(/\0+$/g, "").trim();
 }
 
+function parseId3Artist(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.length < 10 || String.fromCharCode(...bytes.subarray(0, 3)) !== "ID3") return "";
+  const version = bytes[3];
+  if (version < 3 || version > 4) return "";
+  const tagSize = (bytes[6] << 21) | (bytes[7] << 14) | (bytes[8] << 7) | bytes[9];
+  const tagEnd = Math.min(bytes.length, 10 + tagSize);
+  let offset = 10;
+  if (bytes[5] & 0x40) {
+    if (offset + 4 > tagEnd) return "";
+    const extendedSize = version === 4
+      ? ((bytes[offset] << 21) | (bytes[offset + 1] << 14) | (bytes[offset + 2] << 7) | bytes[offset + 3])
+      : view.getUint32(offset);
+    offset += version === 4 ? extendedSize : extendedSize + 4;
+  }
+
+  while (offset + 10 <= tagEnd) {
+    const frameId = String.fromCharCode(...bytes.subarray(offset, offset + 4));
+    if (!/^[A-Z0-9]{4}$/.test(frameId)) break;
+    const size = version === 4
+      ? ((bytes[offset + 4] << 21) | (bytes[offset + 5] << 14) | (bytes[offset + 6] << 7) | bytes[offset + 7])
+      : view.getUint32(offset + 4);
+    const frameStart = offset + 10;
+    const frameEnd = frameStart + size;
+    if (size <= 0 || frameEnd > tagEnd) break;
+    if (frameId === "TPE1") return decodeChapterTitle(bytes.subarray(frameStart, frameEnd));
+    offset = frameEnd;
+  }
+  return "";
+}
+
 function parseId3Chapters(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (bytes.length < 10 || String.fromCharCode(...bytes.subarray(0, 3)) !== "ID3") return [];
@@ -202,6 +235,27 @@ function parseId3Chapters(bytes) {
       ? ((bytes[offset] << 21) | (bytes[offset + 1] << 14) | (bytes[offset + 2] << 7) | bytes[offset + 3])
       : view.getUint32(offset);
     offset += version === 4 ? extendedSize : extendedSize + 4;
+  }
+
+  async function parseMp4Artist(file) {
+    const chunkSize = 2 * 1024 * 1024;
+    const overlap = 16;
+    for (let start = 0; start < file.size; start += chunkSize) {
+      const end = Math.min(file.size, start + chunkSize + overlap);
+      const bytes = new Uint8Array(await file.slice(start, end).arrayBuffer());
+      for (let index = 4; index + 12 <= bytes.length; index += 1) {
+        if (bytes[index] !== 0xa9 || bytes[index + 1] !== 0x41 || bytes[index + 2] !== 0x52 || bytes[index + 3] !== 0x54) continue;
+        const atomStart = index - 4;
+        const atomSize = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(atomStart);
+        const absoluteStart = start + atomStart;
+        if (atomSize < 24 || atomSize > 1024 * 1024 || absoluteStart + atomSize > file.size) continue;
+        const atom = new Uint8Array(await file.slice(absoluteStart, absoluteStart + atomSize).arrayBuffer());
+        const dataSize = new DataView(atom.buffer, atom.byteOffset, atom.byteLength).getUint32(8);
+        if (dataSize < 16 || 8 + dataSize > atom.length || String.fromCharCode(...atom.subarray(12, 16)) !== "data") continue;
+        return new TextDecoder("utf-8").decode(atom.subarray(24, 8 + dataSize)).replace(/\0/g, "").trim();
+      }
+    }
+    return "";
   }
 
   const chapters = [];
@@ -398,6 +452,20 @@ async function readEmbeddedChapters(file) {
   return [];
 }
 
+async function readEmbeddedArtist(file) {
+  if (/\.mp3$/i.test(file.name)) {
+    const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+    if (header.length < 10 || String.fromCharCode(...header.subarray(0, 3)) !== "ID3") return "";
+    const tagSize = (header[6] << 21) | (header[7] << 14) | (header[8] << 7) | header[9];
+    const maxTagSize = 64 * 1024 * 1024;
+    if (tagSize > maxTagSize) throw new Error("ID3 tag is larger than the 64 MB parsing limit");
+    const tag = new Uint8Array(await file.slice(0, Math.min(file.size, tagSize + 10)).arrayBuffer());
+    return parseId3Artist(tag);
+  }
+  if (/\.(m4a|m4b|mp4|aac)$/i.test(file.name)) return parseMp4Artist(file);
+  return "";
+}
+
 async function readEmbeddedArtwork(file) {
   if (/\.(mp3|aac)$/i.test(file.name)) {
     const header = new Uint8Array(await file.slice(0, 10).arrayBuffer());
@@ -485,10 +553,17 @@ function updateActiveChapter() {
 function updateQueue() {
   trackList.replaceChildren();
   queueEmpty.hidden = tracks.length > 0;
+  queueSearch.parentElement.hidden = tracks.length === 0;
   clearButton.hidden = tracks.length === 0;
   trackCount.textContent = `${tracks.length} ${tracks.length === 1 ? "TRACK" : "TRACKS"}`;
+  const query = queueSearch.value.trim().toLocaleLowerCase();
+  const matchingTracks = tracks
+    .map((track, index) => ({ track, index }))
+    .filter(({ track }) => !query || `${track.name} ${track.author || ""}`.toLocaleLowerCase().includes(query));
+  queueNoResults.hidden = tracks.length === 0 || matchingTracks.length > 0;
+  trackList.hidden = matchingTracks.length === 0;
 
-  tracks.forEach((track, index) => {
+  matchingTracks.forEach(({ track, index }) => {
     const item = document.createElement("li");
     item.className = `track-item${index === currentIndex ? " is-current" : ""}`;
     item.setAttribute("aria-current", index === currentIndex ? "true" : "false");
@@ -530,13 +605,22 @@ function updateQueue() {
     name.className = "track-name";
     name.textContent = track.name.replace(/\.[^.]+$/, "");
     name.title = track.name;
+    const details = document.createElement("span");
+    details.className = "track-info";
+    details.append(name);
+    if (track.author) {
+      const author = document.createElement("span");
+      author.className = "track-author";
+      author.textContent = track.author;
+      details.append(author);
+    }
 
     const playIcon = document.createElement("span");
     playIcon.className = "track-play-icon";
     playIcon.setAttribute("aria-hidden", "true");
     playIcon.textContent = index === currentIndex && !audio.paused ? "Ⅱ" : "▶";
 
-    select.append(thumbnail, name);
+    select.append(thumbnail, details);
     select.append(playIcon);
     select.addEventListener("click", () => loadTrack(index, true));
     item.append(select, size, remove);
@@ -614,6 +698,13 @@ async function addFiles(fileList) {
 
 function loadTrackMetadata(files) {
   for (const file of files) {
+    readEmbeddedArtist(file).then((author) => {
+      if (!tracks.includes(file) || !author) return;
+      file.author = author;
+      updateQueue();
+    }).catch((error) => {
+      console.error(`Could not read embedded author from "${file.name}":`, error);
+    });
     readEmbeddedChapters(file).then((chapters) => {
       if (!tracks.includes(file)) return;
       chapterLoadErrors.delete(file);
@@ -688,6 +779,7 @@ function removeTrack(index) {
     audio.removeAttribute("src");
     audio.load();
     releaseActiveUrl();
+    queueSearch.value = "";
     currentIndex = -1;
     showThumbnail();
     trackTitle.textContent = "まだ本が選ばれていません";
@@ -846,6 +938,7 @@ clearButton.addEventListener("click", () => {
   chaptersByTrack.clear();
   chapterLoadErrors.clear();
   tracks = [];
+  queueSearch.value = "";
   currentIndex = -1;
   trackTitle.textContent = "まだ本が選ばれていません";
   trackMeta.textContent = "音声ファイルを追加して、再生をはじめましょう。";
@@ -857,6 +950,8 @@ clearButton.addEventListener("click", () => {
   updateQueue();
   renderChapters();
 });
+
+queueSearch.addEventListener("input", updateQueue);
 
 audio.addEventListener("timeupdate", () => {
   currentTimeLabel.textContent = formatTime(audio.currentTime);

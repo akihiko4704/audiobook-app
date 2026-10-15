@@ -107,7 +107,12 @@
             <div><span class="eyebrow">UP NEXT</span><h2>再生リスト</h2></div>
             <span class="track-count" id="trackCount">0 TRACKS</span>
           </div>
+          <label class="queue-search">
+            <span class="visually-hidden">ファイル名または著者名で検索</span>
+            <input id="queueSearch" type="search" placeholder="ファイル名・著者名で検索" autocomplete="off">
+          </label>
           <div class="queue-empty" id="queueEmpty"><span aria-hidden="true">♫</span><p>再生リストは空です。<br>音声ファイルを追加してください。</p></div>
+          <p class="queue-no-results" id="queueNoResults" hidden>一致する音源がありません。</p>
           <ol class="track-list" id="trackList" aria-label="再生リスト"></ol>
           <button class="clear-button" id="clearButton" type="button" hidden>リストをクリア</button>
           <p class="privacy-note"><span aria-hidden="true">◈</span> 音声はアップロードされず、このブラウザー内に保存されます。<br>次回も同じ端末・ブラウザーで利用できます。</p>

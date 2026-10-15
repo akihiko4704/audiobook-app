@@ -118,6 +118,12 @@ button { color: inherit; }
 .queue-heading { display: flex; align-items: end; justify-content: space-between; }
 .queue-heading h2 { margin: 8px 0 0; font-size: 17px; font-weight: 500; }
 .track-count { color: #777970; font: 8px var(--mono); letter-spacing: .08em; }
+.queue-search { display: block; margin-top: 15px; }
+.queue-search[hidden], .track-list[hidden] { display: none; }
+.queue-search input { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 4px; outline: none; background: rgba(255,255,255,.025); color: #f3f0e8; font-size: 10px; }
+.queue-search input::placeholder { color: #777970; }
+.queue-search input:focus { border-color: rgba(200,212,154,.55); }
+.queue-no-results { margin: 26px 0; color: #85877e; font-size: 10px; text-align: center; }
 .queue-empty { display: flex; min-height: 220px; flex-direction: column; align-items: center; justify-content: center; color: #74766f; text-align: center; }
 .queue-empty > span { color: #a7ad8e; font-size: 27px; }
 .queue-empty p { font-size: 10px; line-height: 1.9; }
@@ -132,7 +138,10 @@ button { color: inherit; }
 .track-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .track-index { display: none; color: #7f8179; font: 9px var(--mono); text-align: center; }
 .track-item.is-current .track-index { color: var(--accent); }
-.track-name { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.track-info { display: grid; min-width: 0; gap: 3px; }
+.track-name, .track-author { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track-name { font-size: 10px; }
+.track-author { color: #85877e; font-size: 8px; }
 .track-play-icon { color: var(--accent); font-size: 9px; opacity: .55; text-align: center; }
 .track-select:hover .track-play-icon, .track-item.is-current .track-play-icon { opacity: 1; }
 .track-size { color: #767870; font: 8px var(--mono); }
@@ -142,6 +151,7 @@ button { color: inherit; }
 .clear-button:hover { color: var(--accent); }
 .privacy-note { margin: 25px 0 0; padding-top: 16px; border-top: 1px solid var(--line); color: #85877e; font-size: 9px; line-height: 1.9; }
 .privacy-note span { margin-right: 4px; color: var(--accent); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
 footer { padding: 0 0 24px; color: #66685f; font: 8px var(--mono); letter-spacing: .17em; text-align: center; }
 footer span { padding-left: 8px; color: #92977c; }
 
