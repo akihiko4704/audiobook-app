@@ -1,5 +1,8 @@
 const audio = document.querySelector("#audioPlayer");
 const fileInput = document.querySelector("#fileInput");
+const folderInput = document.querySelector("#folderInput");
+const folderImportButton = document.querySelector("#folderImportButton");
+const folderImportMessage = document.querySelector("#folderImportMessage");
 const dropZone = document.querySelector("#dropZone");
 const remoteTrackForm = document.querySelector("#remoteTrackForm");
 const remoteTrackUrl = document.querySelector("#remoteTrackUrl");
@@ -36,6 +39,8 @@ const thumbnails = new Map();
 const chaptersByTrack = new Map();
 const chapterLoadErrors = new Set();
 const trackStorageIds = new Map();
+const trackRelativePaths = new Map();
+const trackSaveOperations = new Map();
 let audioLibrary = null;
 let audioLibraryReady;
 
@@ -79,6 +84,7 @@ function initializeAudioLibrary() {
           });
       tracks.push(track);
       trackStorageIds.set(track, storedTrack.id);
+      if (storedTrack.relativePath) trackRelativePaths.set(track, storedTrack.relativePath);
       if (!track.remoteUrl) loadTrackMetadata([track]);
     }
     updateQueue();
@@ -116,6 +122,7 @@ function storedTrackRecord(track) {
     name: track.name,
     type: track.type,
     lastModified: track.lastModified,
+    relativePath: trackRelativePaths.get(track) || track.webkitRelativePath || "",
     blob: track,
   };
 }
@@ -134,6 +141,8 @@ async function persistTracks(newTracks) {
 }
 
 async function removePersistedTrack(track) {
+  const pendingSave = trackSaveOperations.get(track);
+  if (pendingSave && !(await pendingSave)) return;
   const id = trackStorageIds.get(track);
   if (id === undefined) return;
   await writeAudioLibrary((store) => store.delete(id));
@@ -141,19 +150,23 @@ async function removePersistedTrack(track) {
 }
 
 async function clearPersistedTracks() {
+  await Promise.all(trackSaveOperations.values());
   await writeAudioLibrary((store) => store.clear());
   trackStorageIds.clear();
 }
 
 async function saveTracks(newTracks) {
-  try {
-    await persistTracks(newTracks);
-    return true;
-  } catch (error) {
+  const operation = persistTracks(newTracks).then(() => true).catch((error) => {
     console.error("Could not save added tracks:", error);
     trackMeta.textContent = "音源は再生できますが、次回のための保存に失敗しました。ブラウザーの空き容量を確認してください。";
     return false;
-  }
+  });
+  newTracks.forEach((track) => trackSaveOperations.set(track, operation));
+  const saved = await operation;
+  newTracks.forEach((track) => {
+    if (trackSaveOperations.get(track) === operation) trackSaveOperations.delete(track);
+  });
+  return saved;
 }
 
 function formatTime(seconds) {
@@ -588,28 +601,51 @@ async function playAudio() {
   }
 }
 
-async function addFiles(fileList) {
+async function addFiles(fileList, fromFolder = false) {
   const selectedFiles = Array.from(fileList);
   await audioLibraryReady;
   const audioFiles = selectedFiles.filter((file) =>
     file.type.startsWith("audio/") || /\.(mp3|m4a|m4b|aac|wav|ogg|flac|opus)$/i.test(file.name)
   );
+  if (fromFolder) {
+    audioFiles.sort((left, right) => left.webkitRelativePath.localeCompare(right.webkitRelativePath, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    }));
+  }
   if (audioFiles.length === 0) {
-    trackMeta.textContent = "音声ファイルを選択してください。";
-    return;
+    if (fromFolder) folderImportMessage.textContent = "選択したフォルダ内に音声ファイルが見つかりませんでした。";
+    else trackMeta.textContent = "音声ファイルを選択してください。";
+    return { added: 0, skipped: 0, saved: false };
+  }
+
+  const knownPaths = new Set(trackRelativePaths.values());
+  const newAudioFiles = fromFolder
+    ? audioFiles.filter((file) => !file.webkitRelativePath || !knownPaths.has(file.webkitRelativePath))
+    : audioFiles;
+  const skipped = selectedFiles.length - audioFiles.length + audioFiles.length - newAudioFiles.length;
+  if (newAudioFiles.length === 0) {
+    folderImportMessage.textContent = "このフォルダの音声ファイルはすでに再生リストにあります。";
+    return { added: 0, skipped, saved: true };
+  }
+  if (fromFolder) {
+    for (const file of newAudioFiles) {
+      if (file.webkitRelativePath) trackRelativePaths.set(file, file.webkitRelativePath);
+    }
   }
 
   const wasEmpty = tracks.length === 0;
-  tracks.push(...audioFiles);
+  tracks.push(...newAudioFiles);
   updateQueue();
   if (wasEmpty) loadTrack(0);
-  loadTrackMetadata(audioFiles);
-  const saved = await saveTracks(audioFiles);
+  loadTrackMetadata(newAudioFiles);
+  const saved = await saveTracks(newAudioFiles);
   if (audioFiles.length < selectedFiles.length) {
     trackMeta.textContent = saved
       ? "一部のファイルは音声形式ではないため追加されませんでした。"
       : "一部のファイルは音声形式ではないため追加されず、音源の保存にも失敗しました。";
   }
+  return { added: newAudioFiles.length, skipped, saved };
 }
 
 function loadTrackMetadata(files) {
@@ -671,6 +707,7 @@ async function addRemoteTrack(value) {
 function removeTrack(index) {
   const wasCurrent = index === currentIndex;
   const [removedTrack] = tracks.splice(index, 1);
+  trackRelativePaths.delete(removedTrack);
   removePersistedTrack(removedTrack).catch((error) => {
     console.error(`Could not remove "${removedTrack.name}" from the audio library:`, error);
     trackMeta.textContent = "この音源を保存領域から削除できませんでした。";
@@ -800,6 +837,23 @@ fileInput.addEventListener("change", (event) => {
   fileInput.value = "";
 });
 
+folderImportButton.addEventListener("click", () => folderInput.click());
+
+folderInput.addEventListener("change", (event) => {
+  const files = event.target.files;
+  folderImportMessage.textContent = "フォルダ内の音声ファイルを検索しています…";
+  addFiles(files, true).then(({ added, skipped, saved }) => {
+    if (added === 0) return;
+    folderImportMessage.textContent = saved
+      ? `${added}件を保存して再生リストに追加しました。${skipped > 0 ? `（${skipped}件は対象外または追加済み）` : ""}`
+      : `${added}件を再生リストに追加しましたが、保存に失敗しました。`;
+  }).catch((error) => {
+    console.error("Could not import audio files from selected folder:", error);
+    folderImportMessage.textContent = "フォルダ内の音声ファイルを読み込めませんでした。";
+  });
+  folderInput.value = "";
+});
+
 remoteTrackForm.addEventListener("submit", (event) => {
   event.preventDefault();
   addRemoteTrack(remoteTrackUrl.value).then((added) => {
@@ -845,6 +899,7 @@ clearButton.addEventListener("click", () => {
   thumbnails.clear();
   chaptersByTrack.clear();
   chapterLoadErrors.clear();
+  trackRelativePaths.clear();
   tracks = [];
   currentIndex = -1;
   trackTitle.textContent = "まだ本が選ばれていません";
