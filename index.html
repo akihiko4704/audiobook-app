@@ -92,14 +92,11 @@
             <span class="drop-copy"><strong>オーディオブックを追加</strong><small>クリックして選択、またはここに音声ファイルをドロップ</small></span>
             <span class="file-types">MP3 · M4A · M4B · WAV など</span>
           </label>
-          <form class="remote-track-form" id="remoteTrackForm">
-            <label for="remoteTrackUrl"><span class="eyebrow">TAILSCALE STREAM</span><span>音声URL</span></label>
-            <div class="remote-track-fields">
-              <input id="remoteTrackUrl" type="url" inputmode="url" placeholder="https://server.tailnet.ts.net/books/book.m4b" autocomplete="url" required>
-              <button type="submit">URLから追加</button>
-            </div>
-            <p class="remote-track-message" id="remoteTrackMessage" aria-live="polite"></p>
-          </form>
+          <div class="folder-import">
+            <input id="folderInput" type="file" accept="audio/*,.mp3,.m4a,.m4b,.aac,.wav,.ogg,.flac,.opus" webkitdirectory directory multiple hidden>
+            <button id="folderImportButton" type="button">フォルダを検索</button>
+            <p id="folderImportMessage" aria-live="polite"></p>
+          </div>
         </div>
 
         <aside class="queue-panel">

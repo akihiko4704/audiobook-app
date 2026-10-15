@@ -1,9 +1,9 @@
 const audio = document.querySelector("#audioPlayer");
 const fileInput = document.querySelector("#fileInput");
+const folderInput = document.querySelector("#folderInput");
+const folderImportButton = document.querySelector("#folderImportButton");
+const folderImportMessage = document.querySelector("#folderImportMessage");
 const dropZone = document.querySelector("#dropZone");
-const remoteTrackForm = document.querySelector("#remoteTrackForm");
-const remoteTrackUrl = document.querySelector("#remoteTrackUrl");
-const remoteTrackMessage = document.querySelector("#remoteTrackMessage");
 const trackList = document.querySelector("#trackList");
 const queueEmpty = document.querySelector("#queueEmpty");
 const queueSearch = document.querySelector("#queueSearch");
@@ -680,7 +680,7 @@ async function addFiles(fileList) {
   );
   if (audioFiles.length === 0) {
     trackMeta.textContent = "音声ファイルを選択してください。";
-    return;
+    return { addedCount: 0, saved: false };
   }
 
   const wasEmpty = tracks.length === 0;
@@ -694,6 +694,7 @@ async function addFiles(fileList) {
       ? "一部のファイルは音声形式ではないため追加されませんでした。"
       : "一部のファイルは音声形式ではないため追加されず、音源の保存にも失敗しました。";
   }
+  return { addedCount: audioFiles.length, saved };
 }
 
 function loadTrackMetadata(files) {
@@ -725,38 +726,6 @@ function loadTrackMetadata(files) {
       console.error(`Could not read embedded artwork from "${file.name}":`, error);
     });
   }
-}
-
-async function addRemoteTrack(value) {
-  let url;
-  try {
-    url = new URL(value.trim());
-  } catch {
-    remoteTrackMessage.textContent = "音声ファイルのURLを入力してください。";
-    return false;
-  }
-  if (!/^https?:$/.test(url.protocol) || url.username || url.password) {
-    remoteTrackMessage.textContent = "HTTP または HTTPS の音声URLを入力してください。";
-    return false;
-  }
-
-  let name = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
-  try {
-    name = decodeURIComponent(name);
-  } catch {
-    // Keep the encoded name when the path contains malformed escapes.
-  }
-  await audioLibraryReady;
-  const wasEmpty = tracks.length === 0;
-  const track = { name, remoteUrl: url.href };
-  tracks.push(track);
-  updateQueue();
-  if (wasEmpty) loadTrack(0);
-  const saved = await saveTracks([track]);
-  remoteTrackMessage.textContent = saved
-    ? "再生リストに追加しました。"
-    : "再生リストに追加しましたが、次回のための保存に失敗しました。";
-  return true;
 }
 
 function removeTrack(index) {
@@ -892,14 +861,23 @@ fileInput.addEventListener("change", (event) => {
   fileInput.value = "";
 });
 
-remoteTrackForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  addRemoteTrack(remoteTrackUrl.value).then((added) => {
-    if (added) remoteTrackUrl.value = "";
+folderImportButton.addEventListener("click", () => folderInput.click());
+
+folderInput.addEventListener("change", () => {
+  folderImportMessage.textContent = "";
+  addFiles(folderInput.files).then(({ addedCount, saved }) => {
+    if (addedCount === 0) {
+      folderImportMessage.textContent = "選択したフォルダに音声ファイルが見つかりませんでした。";
+    } else {
+      folderImportMessage.textContent = saved
+        ? `${addedCount} 件の音声ファイルを再生リストに追加・保存しました。`
+        : `${addedCount} 件を再生リストに追加しましたが、保存に失敗しました。`;
+    }
   }).catch((error) => {
-    console.error("Could not add remote audio track:", error);
-    remoteTrackMessage.textContent = "音源を追加できませんでした。";
+    console.error("Could not import audio files from the selected folder:", error);
+    folderImportMessage.textContent = "フォルダ内の音源を追加できませんでした。";
   });
+  folderInput.value = "";
 });
 
 coverUploadButton.addEventListener("click", () => {
