@@ -1,6 +1,9 @@
 const audio = document.querySelector("#audioPlayer");
 const fileInput = document.querySelector("#fileInput");
 const dropZone = document.querySelector("#dropZone");
+const remoteTrackForm = document.querySelector("#remoteTrackForm");
+const remoteTrackUrl = document.querySelector("#remoteTrackUrl");
+const remoteTrackMessage = document.querySelector("#remoteTrackMessage");
 const trackList = document.querySelector("#trackList");
 const queueEmpty = document.querySelector("#queueEmpty");
 const playButton = document.querySelector("#playButton");
@@ -43,6 +46,11 @@ function formatTime(seconds) {
 function formatSize(bytes) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function releaseActiveUrl() {
+  if (activeUrl?.startsWith("blob:")) URL.revokeObjectURL(activeUrl);
+  activeUrl = null;
 }
 
 function decodeChapterTitle(bytes) {
@@ -386,7 +394,7 @@ function updateQueue() {
 
     const size = document.createElement("span");
     size.className = "track-size";
-    size.textContent = formatSize(track.size);
+    size.textContent = track.remoteUrl ? "STREAM" : formatSize(track.size);
 
     const remove = document.createElement("button");
     remove.type = "button";
@@ -418,14 +426,18 @@ function updateQueue() {
 
 function loadTrack(index, autoplay = false) {
   if (index < 0 || index >= tracks.length) return;
-  if (activeUrl) URL.revokeObjectURL(activeUrl);
+  releaseActiveUrl();
   currentIndex = index;
-  activeUrl = URL.createObjectURL(tracks[index]);
-  audio.src = activeUrl;
+  const track = tracks[index];
+  if (track.remoteUrl) audio.src = track.remoteUrl;
+  else {
+    activeUrl = URL.createObjectURL(track);
+    audio.src = activeUrl;
+  }
   audio.loop = repeatMode === "one";
   showThumbnail();
-  trackTitle.textContent = tracks[index].name.replace(/\.[^.]+$/, "");
-  trackMeta.textContent = "ローカルオーディオブック";
+  trackTitle.textContent = track.name.replace(/\.[^.]+$/, "");
+  trackMeta.textContent = track.remoteUrl ? "ネットワーク音源をストリーミング" : "ローカルオーディオブック";
   playButton.disabled = false;
   seekBar.disabled = false;
   currentTimeLabel.textContent = "0:00";
@@ -495,6 +507,33 @@ function addFiles(fileList) {
   }
 }
 
+function addRemoteTrack(value) {
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    remoteTrackMessage.textContent = "音声ファイルのURLを入力してください。";
+    return false;
+  }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) {
+    remoteTrackMessage.textContent = "HTTP または HTTPS の音声URLを入力してください。";
+    return false;
+  }
+
+  let name = url.pathname.split("/").filter(Boolean).pop() || url.hostname;
+  try {
+    name = decodeURIComponent(name);
+  } catch {
+    // Keep the encoded name when the path contains malformed escapes.
+  }
+  const wasEmpty = tracks.length === 0;
+  tracks.push({ name, remoteUrl: url.href });
+  updateQueue();
+  remoteTrackMessage.textContent = "再生リストに追加しました。";
+  if (wasEmpty) loadTrack(0);
+  return true;
+}
+
 function removeTrack(index) {
   const wasCurrent = index === currentIndex;
   const [removedTrack] = tracks.splice(index, 1);
@@ -510,8 +549,7 @@ function removeTrack(index) {
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
-    if (activeUrl) URL.revokeObjectURL(activeUrl);
-    activeUrl = null;
+    releaseActiveUrl();
     currentIndex = -1;
     showThumbnail();
     trackTitle.textContent = "まだ本が選ばれていません";
@@ -621,6 +659,11 @@ fileInput.addEventListener("change", (event) => {
   fileInput.value = "";
 });
 
+remoteTrackForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (addRemoteTrack(remoteTrackUrl.value)) remoteTrackUrl.value = "";
+});
+
 coverUploadButton.addEventListener("click", () => {
   if (currentIndex >= 0) coverInput.click();
 });
@@ -647,8 +690,7 @@ clearButton.addEventListener("click", () => {
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
-  if (activeUrl) URL.revokeObjectURL(activeUrl);
-  activeUrl = null;
+  releaseActiveUrl();
   for (const thumbnailUrl of thumbnails.values()) URL.revokeObjectURL(thumbnailUrl);
   thumbnails.clear();
   chaptersByTrack.clear();
@@ -677,6 +719,12 @@ audio.addEventListener("timeupdate", () => {
 audio.addEventListener("loadedmetadata", () => {
   durationLabel.textContent = formatTime(audio.duration);
   renderChapters();
+});
+
+audio.addEventListener("error", () => {
+  if (tracks[currentIndex]?.remoteUrl) {
+    trackMeta.textContent = "音声を読み込めません。URL、Tailscale接続、配信元の設定を確認してください。";
+  }
 });
 
 audio.addEventListener("play", () => {
