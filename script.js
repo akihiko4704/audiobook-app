@@ -35,6 +35,126 @@ let repeatMode = "off";
 const thumbnails = new Map();
 const chaptersByTrack = new Map();
 const chapterLoadErrors = new Set();
+const trackStorageIds = new Map();
+let audioLibrary = null;
+let audioLibraryReady;
+
+function openAudioLibrary() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("IndexedDB is not available"));
+      return;
+    }
+
+    const request = window.indexedDB.open("audiobook-player", 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore("tracks", { keyPath: "id", autoIncrement: true });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open audio library"));
+    request.onblocked = () => reject(new Error("Opening the audio library was blocked"));
+  });
+}
+
+function readStoredTracks(database) {
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction("tracks", "readonly");
+    const request = transaction.objectStore("tracks").getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not read audio library"));
+    transaction.onabort = () => reject(transaction.error || new Error("Reading the audio library was aborted"));
+  });
+}
+
+function initializeAudioLibrary() {
+  return openAudioLibrary().then(async (database) => {
+    audioLibrary = database;
+    const storedTracks = await readStoredTracks(database);
+    for (const storedTrack of storedTracks) {
+      const track = storedTrack.remoteUrl
+        ? { name: storedTrack.name, remoteUrl: storedTrack.remoteUrl }
+        : new File([storedTrack.blob], storedTrack.name, {
+            type: storedTrack.type,
+            lastModified: storedTrack.lastModified,
+          });
+      tracks.push(track);
+      trackStorageIds.set(track, storedTrack.id);
+      if (!track.remoteUrl) loadTrackMetadata([track]);
+    }
+    updateQueue();
+    if (tracks.length > 0) loadTrack(0);
+    return database;
+  }).catch((error) => {
+    console.error("Could not restore the audio library:", error);
+    trackMeta.textContent = "保存済みの音源を読み込めませんでした。ブラウザーの保存領域を確認してください。";
+    return null;
+  });
+}
+
+async function writeAudioLibrary(write) {
+  const database = await audioLibraryReady;
+  if (!database) throw new Error("Audio library is not available");
+
+  return new Promise((resolve, reject) => {
+    let transaction;
+    try {
+      transaction = database.transaction("tracks", "readwrite");
+      write(transaction.objectStore("tracks"));
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("Could not save audio library"));
+    transaction.onabort = () => reject(transaction.error || new Error("Saving the audio library was aborted"));
+  });
+}
+
+function storedTrackRecord(track) {
+  if (track.remoteUrl) return { name: track.name, remoteUrl: track.remoteUrl };
+  return {
+    name: track.name,
+    type: track.type,
+    lastModified: track.lastModified,
+    blob: track,
+  };
+}
+
+async function persistTracks(newTracks) {
+  const ids = [];
+  await writeAudioLibrary((store) => {
+    newTracks.forEach((track, index) => {
+      const request = store.add(storedTrackRecord(track));
+      request.onsuccess = () => {
+        ids[index] = request.result;
+      };
+    });
+  });
+  newTracks.forEach((track, index) => trackStorageIds.set(track, ids[index]));
+}
+
+async function removePersistedTrack(track) {
+  const id = trackStorageIds.get(track);
+  if (id === undefined) return;
+  await writeAudioLibrary((store) => store.delete(id));
+  trackStorageIds.delete(track);
+}
+
+async function clearPersistedTracks() {
+  await writeAudioLibrary((store) => store.clear());
+  trackStorageIds.clear();
+}
+
+async function saveTracks(newTracks) {
+  try {
+    await persistTracks(newTracks);
+    return true;
+  } catch (error) {
+    console.error("Could not save added tracks:", error);
+    trackMeta.textContent = "音源は再生できますが、次回のための保存に失敗しました。ブラウザーの空き容量を確認してください。";
+    return false;
+  }
+}
 
 function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
@@ -468,8 +588,10 @@ async function playAudio() {
   }
 }
 
-function addFiles(fileList) {
-  const audioFiles = Array.from(fileList).filter((file) =>
+async function addFiles(fileList) {
+  const selectedFiles = Array.from(fileList);
+  await audioLibraryReady;
+  const audioFiles = selectedFiles.filter((file) =>
     file.type.startsWith("audio/") || /\.(mp3|m4a|m4b|aac|wav|ogg|flac|opus)$/i.test(file.name)
   );
   if (audioFiles.length === 0) {
@@ -481,7 +603,17 @@ function addFiles(fileList) {
   tracks.push(...audioFiles);
   updateQueue();
   if (wasEmpty) loadTrack(0);
-  for (const file of audioFiles) {
+  loadTrackMetadata(audioFiles);
+  const saved = await saveTracks(audioFiles);
+  if (audioFiles.length < selectedFiles.length) {
+    trackMeta.textContent = saved
+      ? "一部のファイルは音声形式ではないため追加されませんでした。"
+      : "一部のファイルは音声形式ではないため追加されず、音源の保存にも失敗しました。";
+  }
+}
+
+function loadTrackMetadata(files) {
+  for (const file of files) {
     readEmbeddedChapters(file).then((chapters) => {
       if (!tracks.includes(file)) return;
       chapterLoadErrors.delete(file);
@@ -502,12 +634,9 @@ function addFiles(fileList) {
       console.error(`Could not read embedded artwork from "${file.name}":`, error);
     });
   }
-  if (audioFiles.length < fileList.length) {
-    trackMeta.textContent = "一部のファイルは音声形式ではないため追加されませんでした。";
-  }
 }
 
-function addRemoteTrack(value) {
+async function addRemoteTrack(value) {
   let url;
   try {
     url = new URL(value.trim());
@@ -526,17 +655,26 @@ function addRemoteTrack(value) {
   } catch {
     // Keep the encoded name when the path contains malformed escapes.
   }
+  await audioLibraryReady;
   const wasEmpty = tracks.length === 0;
-  tracks.push({ name, remoteUrl: url.href });
+  const track = { name, remoteUrl: url.href };
+  tracks.push(track);
   updateQueue();
-  remoteTrackMessage.textContent = "再生リストに追加しました。";
   if (wasEmpty) loadTrack(0);
+  const saved = await saveTracks([track]);
+  remoteTrackMessage.textContent = saved
+    ? "再生リストに追加しました。"
+    : "再生リストに追加しましたが、次回のための保存に失敗しました。";
   return true;
 }
 
 function removeTrack(index) {
   const wasCurrent = index === currentIndex;
   const [removedTrack] = tracks.splice(index, 1);
+  removePersistedTrack(removedTrack).catch((error) => {
+    console.error(`Could not remove "${removedTrack.name}" from the audio library:`, error);
+    trackMeta.textContent = "この音源を保存領域から削除できませんでした。";
+  });
   chaptersByTrack.delete(removedTrack);
   chapterLoadErrors.delete(removedTrack);
   const thumbnailUrl = thumbnails.get(removedTrack);
@@ -655,13 +793,21 @@ repeatButton.addEventListener("click", () => {
 });
 
 fileInput.addEventListener("change", (event) => {
-  addFiles(event.target.files);
+  addFiles(event.target.files).catch((error) => {
+    console.error("Could not add selected audio files:", error);
+    trackMeta.textContent = "選択した音源を追加できませんでした。";
+  });
   fileInput.value = "";
 });
 
 remoteTrackForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (addRemoteTrack(remoteTrackUrl.value)) remoteTrackUrl.value = "";
+  addRemoteTrack(remoteTrackUrl.value).then((added) => {
+    if (added) remoteTrackUrl.value = "";
+  }).catch((error) => {
+    console.error("Could not add remote audio track:", error);
+    remoteTrackMessage.textContent = "音源を追加できませんでした。";
+  });
 });
 
 coverUploadButton.addEventListener("click", () => {
@@ -687,6 +833,10 @@ coverInput.addEventListener("change", () => {
 });
 
 clearButton.addEventListener("click", () => {
+  clearPersistedTracks().catch((error) => {
+    console.error("Could not clear the audio library:", error);
+    trackMeta.textContent = "保存済み音源を削除できませんでした。";
+  });
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
@@ -756,9 +906,13 @@ dropZone.addEventListener("dragleave", (event) => {
 dropZone.addEventListener("drop", (event) => {
   event.preventDefault();
   dropZone.classList.remove("is-dragging");
-  addFiles(event.dataTransfer.files);
+  addFiles(event.dataTransfer.files).catch((error) => {
+    console.error("Could not add dropped audio files:", error);
+    trackMeta.textContent = "ドロップした音源を追加できませんでした。";
+  });
 });
 
 audio.volume = 0.8;
+audioLibraryReady = initializeAudioLibrary();
 updateQueue();
 renderChapters();
