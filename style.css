@@ -136,6 +136,7 @@ button { color: inherit; }
 .track-name, .track-author { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-name { font-size: 10px; }
 .track-author { color: #85877e; font-size: 8px; }
+.track-resume-position { color: var(--accent); font: 8px var(--mono); }
 .track-play-icon { color: var(--accent); font-size: 9px; opacity: .55; text-align: center; }
 .track-select:hover .track-play-icon, .track-item.is-current .track-play-icon { opacity: 1; }
 .track-size { color: #767870; font: 8px var(--mono); }

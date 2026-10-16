@@ -32,14 +32,22 @@ const nextChapterButton = document.querySelector("#nextChapterButton");
 
 let tracks = [];
 let currentIndex = -1;
+let loadedTrack = null;
+let loadedTrackReady = false;
+let pendingPlaybackStart = false;
+let pendingResumeSeek = false;
+let pendingResumePosition = 0;
 let activeUrl = null;
 let repeatMode = "off";
 const thumbnails = new Map();
 const chaptersByTrack = new Map();
 const chapterLoadErrors = new Set();
 const trackStorageIds = new Map();
+const playbackPositions = new WeakMap();
+const lastPlaybackSaveTimes = new WeakMap();
 let audioLibrary = null;
 let audioLibraryReady;
+let playbackSaveTimer = null;
 
 function openAudioLibrary() {
   return new Promise((resolve, reject) => {
@@ -48,9 +56,15 @@ function openAudioLibrary() {
       return;
     }
 
-    const request = window.indexedDB.open("audiobook-player", 1);
+    const request = window.indexedDB.open("audiobook-player", 2);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore("tracks", { keyPath: "id", autoIncrement: true });
+      const database = request.result;
+      if (!database.objectStoreNames.contains("tracks")) {
+        database.createObjectStore("tracks", { keyPath: "id", autoIncrement: true });
+      }
+      if (!database.objectStoreNames.contains("playbackState")) {
+        database.createObjectStore("playbackState", { keyPath: "key" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("Could not open audio library"));
@@ -68,10 +82,30 @@ function readStoredTracks(database) {
   });
 }
 
+function readPlaybackState(database) {
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction("playbackState", "readonly");
+    const request = transaction.objectStore("playbackState").getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not read playback state"));
+    transaction.onabort = () => reject(transaction.error || new Error("Reading playback state was aborted"));
+  });
+}
+
 function initializeAudioLibrary() {
   return openAudioLibrary().then(async (database) => {
     audioLibrary = database;
-    const storedTracks = await readStoredTracks(database);
+    const [storedTracks, storedPlaybackState] = await Promise.all([
+      readStoredTracks(database),
+      readPlaybackState(database),
+    ]);
+    const playbackPositionsById = new Map(
+      storedPlaybackState
+        .filter((state) => state.key.startsWith("position:"))
+        .map((state) => [Number(state.key.slice("position:".length)), state.position])
+    );
+    const currentTrackId = storedPlaybackState.find((state) => state.key === "currentTrack")?.trackId;
+    let restoredTrackIndex = -1;
     for (const storedTrack of storedTracks) {
       const track = storedTrack.remoteUrl
         ? { name: storedTrack.name, remoteUrl: storedTrack.remoteUrl }
@@ -81,15 +115,100 @@ function initializeAudioLibrary() {
           });
       tracks.push(track);
       trackStorageIds.set(track, storedTrack.id);
+      if (playbackPositionsById.has(storedTrack.id)) {
+        playbackPositions.set(track, playbackPositionsById.get(storedTrack.id));
+      }
+      if (storedTrack.id === currentTrackId) restoredTrackIndex = tracks.length - 1;
       if (!track.remoteUrl) loadTrackMetadata([track]);
     }
     updateQueue();
-    if (tracks.length > 0) loadTrack(0);
+    if (tracks.length > 0) loadTrack(restoredTrackIndex >= 0 ? restoredTrackIndex : 0);
     return database;
   }).catch((error) => {
     console.error("Could not restore the audio library:", error);
     trackMeta.textContent = "保存済みの音源を読み込めませんでした。ブラウザーの保存領域を確認してください。";
     return null;
+  });
+}
+
+async function persistPlaybackState(track, position) {
+  const database = await audioLibraryReady;
+  if (!database) throw new Error("Audio library is not available");
+  const trackId = trackStorageIds.get(track);
+  if (trackId === undefined) return;
+
+  return new Promise((resolve, reject) => {
+    let transaction;
+    try {
+      transaction = database.transaction("playbackState", "readwrite");
+      const store = transaction.objectStore("playbackState");
+      store.put({ key: `position:${trackId}`, position });
+      if (tracks[currentIndex] === track) store.put({ key: "currentTrack", trackId });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("Could not save playback state"));
+    transaction.onabort = () => reject(transaction.error || new Error("Saving playback state was aborted"));
+  });
+}
+
+async function deletePlaybackState(trackId) {
+  const database = await audioLibraryReady;
+  if (!database) return;
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction("playbackState", "readwrite");
+    const store = transaction.objectStore("playbackState");
+    store.delete(`position:${trackId}`);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("Could not delete playback state"));
+    transaction.onabort = () => reject(transaction.error || new Error("Deleting playback state was aborted"));
+  });
+}
+
+async function clearPlaybackState() {
+  const database = await audioLibraryReady;
+  if (!database) return;
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction("playbackState", "readwrite");
+    transaction.objectStore("playbackState").clear();
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error("Could not clear playback state"));
+    transaction.onabort = () => reject(transaction.error || new Error("Clearing playback state was aborted"));
+  });
+}
+
+function savePlaybackProgress(immediate = false) {
+  const track = loadedTrack;
+  if (!loadedTrackReady || !track || !tracks.includes(track) || !Number.isFinite(audio.currentTime)) return;
+
+  const position = audio.ended ? 0 : audio.currentTime;
+  playbackPositions.set(track, position);
+  const lastSavedAt = lastPlaybackSaveTimes.get(track) || 0;
+  const delay = Math.max(0, 5000 - (Date.now() - lastSavedAt));
+  if (!immediate && delay > 0) {
+    if (!playbackSaveTimer) {
+      playbackSaveTimer = window.setTimeout(() => {
+        playbackSaveTimer = null;
+        savePlaybackProgress(true);
+      }, delay);
+    }
+    return;
+  }
+
+  if (playbackSaveTimer) {
+    window.clearTimeout(playbackSaveTimer);
+    playbackSaveTimer = null;
+  }
+  lastPlaybackSaveTimes.set(track, Date.now());
+  persistPlaybackState(track, position).catch((error) => {
+    console.error(`Could not save playback position for "${track.name}":`, error);
+    if (tracks[currentIndex] === track) {
+      trackMeta.textContent = "再生位置を保存できませんでした。ブラウザーの保存領域を確認してください。";
+    }
   });
 }
 
@@ -133,17 +252,20 @@ async function persistTracks(newTracks) {
     });
   });
   newTracks.forEach((track, index) => trackStorageIds.set(track, ids[index]));
+  if (newTracks.includes(loadedTrack)) savePlaybackProgress(true);
 }
 
 async function removePersistedTrack(track) {
   const id = trackStorageIds.get(track);
   if (id === undefined) return;
   await writeAudioLibrary((store) => store.delete(id));
+  await deletePlaybackState(id);
   trackStorageIds.delete(track);
 }
 
 async function clearPersistedTracks() {
   await writeAudioLibrary((store) => store.clear());
+  await clearPlaybackState();
   trackStorageIds.clear();
 }
 
@@ -614,6 +736,13 @@ function updateQueue() {
       author.textContent = track.author;
       details.append(author);
     }
+    const savedPosition = playbackPositions.get(track) || 0;
+    if (savedPosition > 0) {
+      const resumePosition = document.createElement("span");
+      resumePosition.className = "track-resume-position";
+      resumePosition.textContent = `続きから ${formatTime(savedPosition)}`;
+      details.append(resumePosition);
+    }
 
     const playIcon = document.createElement("span");
     playIcon.className = "track-play-icon";
@@ -622,7 +751,17 @@ function updateQueue() {
 
     select.append(thumbnail, details);
     select.append(playIcon);
-    select.addEventListener("click", () => loadTrack(index, true));
+    select.addEventListener("click", () => {
+      if (index !== currentIndex) {
+        loadTrack(index, true);
+      } else if (audio.paused) {
+        playAudio();
+      } else {
+        pendingPlaybackStart = false;
+        audio.pause();
+        savePlaybackProgress(true);
+      }
+    });
     item.append(select, size, remove);
     trackList.append(item);
   });
@@ -630,9 +769,21 @@ function updateQueue() {
 
 function loadTrack(index, autoplay = false) {
   if (index < 0 || index >= tracks.length) return;
+  if (playbackSaveTimer) {
+    window.clearTimeout(playbackSaveTimer);
+    playbackSaveTimer = null;
+  }
+  savePlaybackProgress(true);
+  audio.pause();
+  loadedTrackReady = false;
+  pendingPlaybackStart = autoplay;
+  pendingResumeSeek = false;
+  pendingResumePosition = 0;
   releaseActiveUrl();
   currentIndex = index;
   const track = tracks[index];
+  loadedTrack = track;
+  const savedPosition = playbackPositions.get(track) || 0;
   if (track.remoteUrl) audio.src = track.remoteUrl;
   else {
     activeUrl = URL.createObjectURL(track);
@@ -646,8 +797,13 @@ function loadTrack(index, autoplay = false) {
   seekBar.disabled = false;
   currentTimeLabel.textContent = "0:00";
   durationLabel.textContent = "0:00";
+  seekBar.value = "0";
   updateQueue();
   renderChapters();
+  persistPlaybackState(track, savedPosition).catch((error) => {
+    console.error(`Could not save the selected track "${track.name}":`, error);
+    trackMeta.textContent = "再生中の音源を保存できませんでした。ブラウザーの保存領域を確認してください。";
+  });
   if (autoplay) playAudio();
 }
 
@@ -664,6 +820,11 @@ function showThumbnail() {
 
 async function playAudio() {
   if (!audio.src) return;
+  if (audio.readyState < HTMLMediaElement.HAVE_METADATA || audio.seeking || pendingResumeSeek) {
+    pendingPlaybackStart = true;
+    return;
+  }
+  pendingPlaybackStart = false;
   try {
     await audio.play();
   } catch (error) {
@@ -744,6 +905,15 @@ function removeTrack(index) {
   }
 
   if (tracks.length === 0) {
+    if (playbackSaveTimer) {
+      window.clearTimeout(playbackSaveTimer);
+      playbackSaveTimer = null;
+    }
+    loadedTrack = null;
+    loadedTrackReady = false;
+    pendingPlaybackStart = false;
+    pendingResumeSeek = false;
+    pendingResumePosition = 0;
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
@@ -769,8 +939,12 @@ function removeTrack(index) {
 }
 
 playButton.addEventListener("click", () => {
-  if (audio.paused) playAudio();
-  else audio.pause();
+  if (audio.paused && !pendingPlaybackStart) playAudio();
+  else {
+    pendingPlaybackStart = false;
+    audio.pause();
+    savePlaybackProgress(true);
+  }
 });
 
 document.querySelector("#previousButton").addEventListener("click", () => {
@@ -907,6 +1081,15 @@ clearButton.addEventListener("click", () => {
     console.error("Could not clear the audio library:", error);
     trackMeta.textContent = "保存済み音源を削除できませんでした。";
   });
+  if (playbackSaveTimer) {
+    window.clearTimeout(playbackSaveTimer);
+    playbackSaveTimer = null;
+  }
+  loadedTrack = null;
+  loadedTrackReady = false;
+  pendingPlaybackStart = false;
+  pendingResumeSeek = false;
+  pendingResumePosition = 0;
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
@@ -932,8 +1115,14 @@ clearButton.addEventListener("click", () => {
 queueSearch.addEventListener("input", updateQueue);
 
 audio.addEventListener("timeupdate", () => {
-  currentTimeLabel.textContent = formatTime(audio.currentTime);
-  if (Number.isFinite(audio.duration) && audio.duration > 0) {
+  if (loadedTrackReady) {
+    currentTimeLabel.textContent = formatTime(audio.currentTime);
+    if (loadedTrack && tracks.includes(loadedTrack)) {
+      playbackPositions.set(loadedTrack, audio.ended ? 0 : audio.currentTime);
+      savePlaybackProgress();
+    }
+  }
+  if (loadedTrackReady && Number.isFinite(audio.duration) && audio.duration > 0) {
     seekBar.value = String(Math.round((audio.currentTime / audio.duration) * 1000));
   }
   updateActiveChapter();
@@ -941,7 +1130,41 @@ audio.addEventListener("timeupdate", () => {
 
 audio.addEventListener("loadedmetadata", () => {
   durationLabel.textContent = formatTime(audio.duration);
+  const track = loadedTrack;
+  if (track && tracks[currentIndex] === track) {
+    const position = playbackPositions.get(track) || 0;
+    if (Number.isFinite(audio.duration) && position >= audio.duration) {
+      playbackPositions.set(track, 0);
+      audio.currentTime = 0;
+      loadedTrackReady = true;
+      savePlaybackProgress(true);
+    } else if (Number.isFinite(audio.duration) && position > 0) {
+      pendingResumeSeek = true;
+      pendingResumePosition = position;
+      audio.currentTime = position;
+      currentTimeLabel.textContent = formatTime(position);
+      seekBar.value = String(Math.round((position / audio.duration) * 1000));
+      if (!audio.seeking) {
+        pendingResumeSeek = false;
+        loadedTrackReady = true;
+        savePlaybackProgress(true);
+      }
+    } else {
+      loadedTrackReady = true;
+    }
+  }
   renderChapters();
+  if (loadedTrackReady && !pendingResumeSeek && !audio.seeking && pendingPlaybackStart) playAudio();
+});
+
+audio.addEventListener("seeked", () => {
+  if (!loadedTrack || tracks[currentIndex] !== loadedTrack) return;
+  if (pendingResumeSeek && Math.abs(audio.currentTime - pendingResumePosition) > 0.5) return;
+  pendingResumeSeek = false;
+  pendingResumePosition = 0;
+  loadedTrackReady = true;
+  savePlaybackProgress(true);
+  if (pendingPlaybackStart) playAudio();
 });
 
 audio.addEventListener("error", () => {
@@ -959,12 +1182,19 @@ audio.addEventListener("play", () => {
 audio.addEventListener("pause", () => {
   playButton.classList.remove("is-playing");
   playButton.setAttribute("aria-label", "再生");
+  savePlaybackProgress(true);
   updateQueue();
 });
 
 audio.addEventListener("ended", () => {
+  savePlaybackProgress(true);
   if (currentIndex < tracks.length - 1) loadTrack(currentIndex + 1, true);
   else if (repeatMode === "all" && tracks.length > 0) loadTrack(0, true);
+});
+
+window.addEventListener("pagehide", () => savePlaybackProgress(true));
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") savePlaybackProgress(true);
 });
 
 dropZone.addEventListener("dragover", (event) => {
